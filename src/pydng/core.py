@@ -18,7 +18,6 @@ import zlib
 
 from .dng import Type, Tag, dngHeader, dngIFD, dngTag, DNG
 
-
 class BroadcomRawHeader(ctypes.Structure):
     _fields_ = [
         ('name',          ctypes.c_char * 32),
@@ -252,7 +251,7 @@ class RPICAM2DNG:
         else:
             raise TypeError("process arguement is not a valid function!")
 
-    def convert(self, image, width=None, length=None, process=None, compress=False, bpp=None):
+    def convert(self, image, width=None, length=None, process=None, compress=False, bpp=None, json_camera_profile=None):
         dngTemplate = DNG()
 
         file_output = False
@@ -293,8 +292,68 @@ class RPICAM2DNG:
 
         rphq_str = ('RP_testc', 'imx477', 'RP_imx477')
 
-        if str(self.etags['Image Model']) in rphq_str:
+        dbr = None
 
+        profile_tone_curve = False
+
+        if json_camera_profile != None:
+            camera_version = json_camera_profile["UniqueCameraModel"]
+
+            profile_name = json_camera_profile["ProfileName"]
+            profile_copyright = json_camera_profile["ProfileCopyright"] # No Tag
+            profile_embed_array = json_camera_profile["ProfileEmbedPolicy"]
+
+            # Multiplier to convert decimals to long ints
+            multiplier = 10000
+
+            # Dict for CalibrationIlluminant values
+            calibration_illuminant_values = {
+              "Unknown": 0,
+              "Daylight": 1,
+              "Fluorescent": 2,
+              "Tungsten (incandescent light)": 3,
+              "Flash": 4,
+              "Fine weather": 9,
+              "Cloudy weather": 10,
+              "Shade": 11,
+              "Daylight fluorescent (D 5700 - 7100K)": 12,
+              "Day white fluorescent (N 4600 - 5400K)": 13,
+              "Cool white fluorescent (W 3900 - 4500K)": 14,
+              "White fluorescent (WW 3200 - 3700K)": 15,
+              "Standard light A": 17,
+              "StdA": 17,
+              "Standard light B": 18,
+              "StdB": 18,
+              "Standard light C": 19,
+              "StdC": 19,
+              "D55": 20,
+              "D65": 21,
+              "D75": 22,
+              "D50": 23,
+              "ISO studio tungsten": 24,
+              "Other light source": 255,
+            }
+
+            ci1 = calibration_illuminant_values[json_camera_profile["CalibrationIlluminant1"]]
+            ci2 = calibration_illuminant_values[json_camera_profile["CalibrationIlluminant2"]]
+
+            ccm1 = (multiplier * np.array(json_camera_profile["ColorMatrix1"])).astype(int).flatten().tolist()
+            ccm1 = [[x, multiplier] for x in ccm1]
+
+            ccm2 = (multiplier * np.array(json_camera_profile["ColorMatrix2"])).astype(int).flatten().tolist()
+            ccm2 = [[x, multiplier] for x in ccm2]
+
+            fm = True
+            fm1 = (multiplier * np.array(json_camera_profile["ForwardMatrix1"])).astype(int).flatten().tolist()
+            fm1 = [[x, multiplier] for x in fm1]
+
+            fm2 = (multiplier * np.array(json_camera_profile["ForwardMatrix2"])).astype(int).flatten().tolist()
+            fm2 = [[x, multiplier] for x in fm2]
+
+            dbr = json_camera_profile["DefaultBlackRender"]
+            profile_tone_curve = np.array(json_camera_profile["ProfileToneCurve"]).flatten().tolist()
+
+        elif (str(self.etags['Image Model']) in rphq_str):
             profile_name = "Repro 2_5D no LUT - D65 is really 5960K"
 
             ccm1 = [[6759, 10000], [-2379, 10000], [751, 10000],
@@ -332,7 +391,7 @@ class RPICAM2DNG:
             ci2 = 23
 
         baseline_exp = 1
-        
+
         camera_calibration = [[1, 1], [0, 1], [0, 1],
                               [0, 1], [1, 1], [0, 1],
                               [0, 1], [0, 1], [1, 1]]
@@ -367,6 +426,16 @@ class RPICAM2DNG:
                 tile = pack14(rawFrame).tobytes()
             elif bpp == 16:
                 tile = rawFrame.tobytes()
+
+        if (isinstance(profile_embed, list)):
+            profile_embed_array = profile_embed
+        else:
+            profile_embed_array = [profile_embed]
+
+        if (dbr != None and dbr != 'None' and dbr != 'Auto'):
+            dbr_array = dbr
+        else:
+            dbr_array = [0]
 
         dngTemplate.ImageDataStrips.append(tile)
         # set up the FULL IFD
@@ -410,9 +479,11 @@ class RPICAM2DNG:
         mainIFD.tags.append(dngTag(Tag.UniqueCameraModel, camera_version))
         mainIFD.tags.append(dngTag(Tag.ColorMatrix1, ccm1))
         mainIFD.tags.append(dngTag(Tag.ColorMatrix2, ccm2))
+
         if fm:
             mainIFD.tags.append(dngTag(Tag.ForwardMatrix1, fm1))
             mainIFD.tags.append(dngTag(Tag.ForwardMatrix2, fm2))
+
         mainIFD.tags.append(dngTag(Tag.CameraCalibration1, camera_calibration))
         mainIFD.tags.append(dngTag(Tag.CameraCalibration2, camera_calibration))
         mainIFD.tags.append(dngTag(Tag.AsShotNeutral, as_shot_neutral))
@@ -420,9 +491,13 @@ class RPICAM2DNG:
         mainIFD.tags.append(dngTag(Tag.CalibrationIlluminant1, [ci1]))
         mainIFD.tags.append(dngTag(Tag.CalibrationIlluminant2, [ci2]))
         mainIFD.tags.append(dngTag(Tag.ProfileName, profile_name))
-        mainIFD.tags.append(dngTag(Tag.ProfileEmbedPolicy, [profile_embed]))
+        mainIFD.tags.append(dngTag(Tag.ProfileEmbedPolicy, profile_embed_array))
+
+        if profile_tone_curve:
+            mainIFD.tags.append(dngTag(Tag.ProfileToneCurve, profile_tone_curve))
         # mainIFD.tags.append(dngTag(Tag.ProfileToneCurve   , [0.0,0.0,1.0,1.0]))
-        mainIFD.tags.append(dngTag(Tag.DefaultBlackRender, [0]))
+
+        mainIFD.tags.append(dngTag(Tag.DefaultBlackRender, dbr_array))
         mainIFD.tags.append(dngTag(Tag.PreviewColorSpace, [2]))
 
         dngTemplate.IFDs.append(mainIFD)
